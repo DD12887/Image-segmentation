@@ -1,0 +1,97 @@
+
+dataDir = fullfile(tempdir,"NewData ");
+if ~exist(dataDir,"dir")   
+    mkdir(dataDir)
+end
+pretrainedNetwork_url = "https://www.mathworks.com/supportfiles/"+ ...
+    "image/data/breastTumorDeepLabV3.tar.gz";
+downloadTrainedNetwork(pretrainedNetwork_url,dataDir);
+
+gunzip(fullfile(dataDir,"breastTumorDeepLabV3.tar.gz"),dataDir);
+untar(fullfile(dataDir,"breastTumorDeepLabV3.tar"),dataDir);
+exampleDir = fullfile(dataDir,"breastTumorDeepLabV3");
+load(fullfile(exampleDir,"breast_seg_deepLabV3.mat"));
+
+
+imTest = imread(("Test4.png"));
+imSize = [256 256];
+imTest = imresize(imTest,imSize);
+
+
+segmentedImg = semanticseg(imTest,trainedNet);
+
+overlayImg = labeloverlay(imTest,segmentedImg,Transparency=0.7,IncludedLabels="tumor", ...
+    Colormap="hsv");
+montage({imTest,overlayImg});
+title('Tumour map using colours');
+
+
+
+imageDir = fullfile("C:\Users\MAHE\Desktop\ANN work\NewData");
+
+imds = imageDatastore(imageDir,"IncludeSubfolders",true,"LabelSource","foldernames");
+imds = subset(imds,find(~contains(imds.Files,"mask")));
+classNames = ["tumor","background"];
+labelIDs = [1 0];
+numClasses = numel(classNames);
+pxds = pixelLabelDatastore(imageDir,classNames,labelIDs,IncludeSubfolders=true);
+pxds = subset(pxds,contains(pxds.Files,"_mask.png"));
+
+
+
+dsCombined = combine(imds,pxds);
+
+
+idxSet = splitlabels(imds.Labels,[0.8,0.1],"randomized",Exclude="Benign");
+dsTrain = subset(dsCombined,idxSet{1});
+dsVal = subset(dsCombined,idxSet{2});
+
+
+
+imageSize = [256 256 3];
+lgraph = deeplabv3plusLayers(imageSize,numClasses,"resnet50");
+
+
+alpha = 0.01;
+beta = 0.99;
+pxLayer = tverskyPixelClassificationLayer("tverskyLoss",alpha,beta);
+lgraph = replaceLayer(lgraph,"classification",pxLayer);
+
+
+
+deepNetworkDesigner(lgraph)
+
+options = trainingOptions("adam", ...
+    ExecutionEnvironment="gpu", ...
+    InitialLearnRate=1e-4, ...
+    ValidationData=dsVal, ...
+    MaxEpochs=300, ...
+    MiniBatchSize=10, ...
+    VerboseFrequency=20, ...
+    Plots="training-progress");
+
+
+doTraining = false;
+if doTraining
+    [trainedNet,info] = trainNetwork(tdsTrain,lgraph,options);
+    modelDateTime = string(datetime("now",Format="yyyy-MM-dd-HH-mm-ss"));
+    save("breastTumorDeepLabv3-"+modelDateTime+".mat","trainedNet");
+end
+
+dsVal = transform(dsVal,@transformBreastTumorImageResize,IncludeInfo=true);
+pxdsResults = semanticseg(dsVal,trainedNet,Verbose=true);
+
+metrics = evaluateSemanticSegmentation(pxdsResults,dsVal,Verbose=true);
+
+[diceTumor,diceBackground,numTestImgs] = evaluateBreastTumorDiceAccuracy(pxdsResults,dsVal);
+
+disp("Average Dice score of background across "+num2str(numTestImgs)+ ...
+    " test images = "+num2str(mean(diceBackground)))
+disp("Average Dice score of tumor across "+num2str(numTestImgs)+ ...
+    " test images = "+num2str(mean(diceTumor)))
+
+figure
+boxchart([diceTumor diceBackground])
+title("Test Set Dice Accuracy")
+xticklabels(classNames)
+ylabel("Dice Coefficient")
